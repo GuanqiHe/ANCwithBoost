@@ -1,12 +1,16 @@
 #include <cstdio>
+#include <cstring>
+#include <ctime>
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <chrono>
 
 #include "NIDAQmx.h"
+#include "yaml.h"
 #include "msgpack.hpp"
 
-#include "controller/default_controller.hpp"
+#include "controlFunction.h"
 #include "logger/data_logging.hpp"
 
 #define DAQmxErrChk(functionCall)            \
@@ -14,70 +18,89 @@
 		goto Error;                          \
 	else
 
-#define PI 3.1415926535
-
 int32 CVICALLBACK DoneCallback(TaskHandle taskHandle, int32 status, void *callbackData);
 
+inline int64 timeConversion(int64 t) { return t + 2082844800; }
 
-void (*controlTaskRun)(const float64 &y, float64 &u) = NULL;
-
-float64 input2dB(float64 data) { return 20 * log10f64(data * 1000 / 50 / (2 * 1e-5)); }
-
-void controlTaskInit()
+int main(int argc, char *argv[])
 {
-}
+	std::string config_path = "config.yaml";
+	if (argc != 1)
+	{
+		config_path = std::string(argv[1]);
+	}
 
-int main(void)
-{
+	// read parameter from config file
+	YAML::Node config = YAML::LoadFile(config_path);
+	const float64 sampleFs = config["sample_fs"].as<float64>();
+	const float64 dist_freq = config["dist_freq"].as<float64>();
+	const float64 dist_gain = config["dist_gain"].as<float64>();
+	const float64 runTime = config["run_time"].as<float64>();	  // sec
+	const float64 warmUp = config["warm_up"].as<float64>();		  // sec
+	const float64 startWait = config["start_wait"].as<float64>(); // sec
+	const float64 analog_read_bias = config["analog_read_bias"].as<float64>();
+	const float64 analog_read_gain = config["analog_read_gain"].as<float64>();
+	// const std::string log_path =  config["log_path"].as<std::string>();
+	const int sample_len = (config["run_time"].as<double>() + config["warm_up"].as<double>()) * config["sample_fs"].as<double>() + 1;
+
+	data_logger logger;
+	logger.init({"t", "y", "d", "u"}, sample_len, config["device_log_path"].as<std::string>());
+
+	printf("config file path: %s \n", config_path.c_str());
+	// printf("log file path: %s \n", log_path.c_str());
+
 	int32 error = 0;
 	char errBuff[2048] = {'\0'};
 	TaskHandle taskHandle_w = 0, taskHandle_r = 0;
+	char trigName[256] = {0};
 
-	const int32 samplesPerChan = 1000;
-	const float64 sampleFs = 25000.0, dist_freq = 35.0;
+	const int32 samplesPerChan = 1;
 
 	const int32 writeNumChan = 2;
-	float64 write_origin[samplesPerChan * writeNumChan] = {0};
+	float64 write_origin[samplesPerChan * writeNumChan + 100] = {0};
 	float64 *writeChan0 = &write_origin[0], *writeChan1 = &write_origin[samplesPerChan];
 
 	const int32 readNumChan = 1;
 	float64 read_origin[samplesPerChan * readNumChan] = {0};
 	float64 *readChan0 = &read_origin[0];
 
-	const float runTime = 10, warmUp = 1.0; // sec
 	const int32 totalNumSamples = (runTime + warmUp) * sampleFs + sampleFs;
-	std::cout << "run time: " << runTime << " "
-			  << "total data points: " << totalNumSamples << std::endl;
 
-	std::ofstream stream("distRejTemp.bin", std::ios::binary);
-	msgpack::packer<std::ofstream> packer(stream);
-	datapack_t data;
-	data.d.reserve(totalNumSamples);
-	data.t.reserve(totalNumSamples);
-	data.u.reserve(totalNumSamples);
-	data.y.reserve(totalNumSamples);
+	std::cout << "run time: " << runTime << " "
+			  << "total data points: " << totalNumSamples << " "
+			  << "Hz: " << sampleFs / samplesPerChan << std::endl;
 
 	int64 index = 0;
 	float64 globalTime = 0;
+	float64 timeout = 10.0 / sampleFs;
+	CVIAbsoluteTime t;
+	void *ctrl_ptr = controllerInit(argc, argv);
 
-	DefaultController controller(dist_freq * 2 * PI, -15.0, 0.0, 1.0 / sampleFs);
+	std::chrono::_V2::system_clock::time_point start, end;
 
 	/*********************************************/
 	// DAQmx Configure Code
 	/*********************************************/
-	DAQmxErrChk(DAQmxCreateTask("", &taskHandle_w));
+	DAQmxErrChk(DAQmxCreateTask("write", &taskHandle_w));
 	DAQmxErrChk(DAQmxCreateAOVoltageChan(taskHandle_w, "Mod1/ao0:1", "", -4.0, 4.0, DAQmx_Val_Volts, NULL));
 	DAQmxErrChk(DAQmxCfgSampClkTiming(taskHandle_w, "OnboardClock", sampleFs, DAQmx_Val_Rising, DAQmx_Val_ContSamps, samplesPerChan));
 	DAQmxErrChk(DAQmxRegisterDoneEvent(taskHandle_w, 0, DoneCallback, NULL));
 
-	DAQmxErrChk(DAQmxCreateTask("", &taskHandle_r));
+	DAQmxErrChk(DAQmxCreateTask("read", &taskHandle_r));
 	DAQmxErrChk(DAQmxCreateAIVoltageChan(taskHandle_r, "Mod2/ai0", "", DAQmx_Val_PseudoDiff, -4.0, 4.0, DAQmx_Val_Volts, NULL));
 	DAQmxErrChk(DAQmxCfgSampClkTiming(taskHandle_r, "OnboardClock", sampleFs, DAQmx_Val_Rising, DAQmx_Val_ContSamps, samplesPerChan));
+	DAQmxErrChk(DAQmxRegisterDoneEvent(taskHandle_r, 0, DoneCallback, NULL));
+
+	t.cviTime.lsb = 0;
+	t.cviTime.msb = timeConversion(time(NULL) + int(startWait));
+	DAQmxCfgTimeStartTrig(taskHandle_w, t, DAQmx_Val_HostTime);
+	DAQmxCfgTimeStartTrig(taskHandle_r, t, DAQmx_Val_HostTime);
 
 	/*********************************************/
 	// DAQmx Write Code
 	/*********************************************/
-	DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan, 0, 10.0, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
+	DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan + 50, 0, 10.0, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
+	// DAQmxErrChk(DAQmxWriteAnalogScalarF64(taskHandle_w, 0, 10.0, 0.0, NULL));
 
 	/*********************************************/
 	// DAQmx Start Code
@@ -85,59 +108,72 @@ int main(void)
 	DAQmxErrChk(DAQmxStartTask(taskHandle_w));
 	DAQmxErrChk(DAQmxStartTask(taskHandle_r));
 
-	for (int i = 0; i < warmUp * sampleFs / samplesPerChan; i++)
+	DAQmxErrChk(DAQmxReadAnalogScalarF64(taskHandle_r, 10.0, &readChan0[0], NULL));
+
+	start = std::chrono::system_clock::now();
+
+	printf("start warm up\n");
+	for (int32 i = 0; i < warmUp * sampleFs; i++)
 	{
 
-		for (int i = 0; i < samplesPerChan; i++)
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 u = 0;
+		float64 y = readChan0[0] * analog_read_gain + analog_read_bias;
+
+		writeChan0[0] = d;
+		writeChan1[0] = u;
+
+		index += 1;
+		globalTime += 1 / sampleFs;
+
+		logger.log({globalTime, y, d, u});
+
+		// DAQmxErrChk(DAQmxWriteAnalogScalarF64(taskHandle_w, 0, timeout, writeChan0[0], NULL));
+		DAQmxErrChk(DAQmxReadAnalogScalarF64(taskHandle_r, timeout, &readChan0[0], NULL));
+		DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan, 0, timeout, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
+		// DAQmxErrChk(DAQmxReadAnalogF64(taskHandle_r, samplesPerChan, 1e-3, DAQmx_Val_GroupByChannel, read_origin, samplesPerChan * readNumChan, &samplesPerChanWrite, NULL));
+		if (i >= warmUp * sampleFs)
 		{
-
-			float64 d = 2.0 * sin(globalTime * dist_freq * 2 * PI);
-			float64 u = 0;
-			float64 y = (read_origin[i] - 0.00025) * 8000;
-
-			data.t.push_back(globalTime);
-			data.d.push_back(d);
-			data.u.push_back(u);
-			data.y.push_back(y);
-
-			writeChan0[i] = d;
-			writeChan1[i] = u;
-
-			index += 1;
-			globalTime += 1 / sampleFs;
+			break;
 		}
-
-		DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan, 0, 10.0, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
-		DAQmxErrChk(DAQmxReadAnalogF64(taskHandle_r, samplesPerChan, 10.0, DAQmx_Val_GroupByChannel, read_origin, 1000, NULL, NULL));
 	}
+	end = std::chrono::system_clock::now();
+	std::cout << "Warm up time: " << double(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()) * std::chrono::microseconds::period::num / std::chrono::microseconds::period::den << std::endl;
 
-	for (int i = 0; i < runTime * sampleFs / samplesPerChan; i++)
+	start = std::chrono::system_clock::now();
+
+	printf("start run main loop\n");
+	for (int i = 0; i < runTime * sampleFs; i++)
 	{
 
-		for (int i = 0; i < samplesPerChan; i++)
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 y = readChan0[0] * analog_read_gain + analog_read_bias;
+		float64 u = controllerCompute(ctrl_ptr, y);
+
+		u = std::min(std::max(u, -4.0), 4.0);
+
+		writeChan0[0] = d;
+		writeChan1[0] = u;
+
+		index += 1;
+		globalTime += 1 / sampleFs;
+
+		logger.log({globalTime, y, d, u});
+
+		// DAQmxErrChk(DAQmxWriteAnalogScalarF64(taskHandle_w, 0, timeout, writeChan0[0], NULL));
+		DAQmxErrChk(DAQmxReadAnalogScalarF64(taskHandle_r, timeout, &readChan0[0], NULL));
+		DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan, 0, timeout, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
+		// DAQmxErrChk(DAQmxReadAnalogF64(taskHandle_r, samplesPerChan, 1e-3, DAQmx_Val_GroupByChannel, read_origin, samplesPerChan * readNumChan, &samplesPerChanWrite, NULL));
+
+		if (i >= runTime * sampleFs)
 		{
-
-			float64 d = 2.0 * sin(globalTime * dist_freq * 2 * PI);
-			float64 u = 0;
-			float64 y = (read_origin[i] - 0.00025) * 8000;
-
-			DefaultController::defaultController(&controller, y, u);
-
-			data.t.push_back(globalTime);
-			data.d.push_back(d);
-			data.u.push_back(u);
-			data.y.push_back(y);
-
-			writeChan0[i] = d;
-			writeChan1[i] = u;
-
-			index += 1;
-			globalTime += 1 / sampleFs;
+			break;
 		}
-
-		DAQmxErrChk(DAQmxWriteAnalogF64(taskHandle_w, samplesPerChan, 0, 10.0, DAQmx_Val_GroupByChannel, write_origin, NULL, NULL));
-		DAQmxErrChk(DAQmxReadAnalogF64(taskHandle_r, samplesPerChan, 10.0, DAQmx_Val_GroupByChannel, read_origin, 1000, NULL, NULL));
 	}
+	end = std::chrono::system_clock::now();
+	std::cout << "Run time: " << double(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()) * std::chrono::microseconds::period::num / std::chrono::microseconds::period::den << std::endl;
+
+	controllerFinish(ctrl_ptr);
 
 	// printf("Generating voltage continuously. Press Enter to interrupt\n");
 	// getchar();
@@ -145,20 +181,22 @@ int main(void)
 Error:
 	if (DAQmxFailed(error))
 		DAQmxGetExtendedErrorInfo(errBuff, 2048);
-	if (taskHandle_w != 0)
+	if (taskHandle_w != 0 || taskHandle_r != 0)
 	{
 		/*********************************************/
 		// DAQmx Stop Code
 		/*********************************************/
 		DAQmxStopTask(taskHandle_w);
 		DAQmxClearTask(taskHandle_w);
+		DAQmxStopTask(taskHandle_r);
+		DAQmxClearTask(taskHandle_r);
 	}
 	if (DAQmxFailed(error))
 		printf("DAQmx Error: %s\n", errBuff);
-	printf("End of program, press Enter key to quit\n");
-	getchar();
-	packer.pack(data);
-	stream.close();
+	printf("End of program\n");
+
+	logger.write();
+
 	return 0;
 }
 

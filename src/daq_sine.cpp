@@ -26,7 +26,6 @@ struct datapack_t
 	MSGPACK_DEFINE_MAP(t, y, d, u);
 };
 
-
 int32 CVICALLBACK DoneCallback(TaskHandle taskHandle, int32 status, void *callbackData);
 
 static int32 GetTerminalNameWithDevPrefix(TaskHandle taskHandle, const char terminalName[], char triggerName[]);
@@ -46,9 +45,9 @@ int main(int argc, char *argv[])
 	const float64 sampleFs = config["sample_fs"].as<float64>();
 	const float64 dist_freq = config["dist_freq"].as<float64>();
 	const float64 dist_gain = config["dist_gain"].as<float64>();
-	const float64 runTime = config["run_time"].as<float64>(); // sec
-	const float64 warmUp = config["warm_up"].as<float64>();	  // sec
-	const float64 startWait = config["start_wait"].as<float64>();	  // sec
+	const float64 runTime = config["run_time"].as<float64>();	  // sec
+	const float64 warmUp = config["warm_up"].as<float64>();		  // sec
+	const float64 startWait = config["start_wait"].as<float64>(); // sec
 	const float64 analog_read_bias = config["analog_read_bias"].as<float64>();
 	const float64 analog_read_gain = config["analog_read_gain"].as<float64>();
 	// const std::string log_path =  config["log_path"].as<std::string>();
@@ -122,7 +121,6 @@ int main(int argc, char *argv[])
 	DAQmxErrChk(DAQmxStartTask(taskHandle_w));
 	DAQmxErrChk(DAQmxStartTask(taskHandle_r));
 
-	
 	DAQmxErrChk(DAQmxReadAnalogScalarF64(taskHandle_r, 10.0, &readChan0[0], NULL));
 
 	start = std::chrono::system_clock::now();
@@ -131,7 +129,7 @@ int main(int argc, char *argv[])
 	for (int32 i = 0; i < warmUp * sampleFs; i++)
 	{
 
-		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI) + 0.3 * dist_gain * sin(globalTime * 2 * dist_freq * 2 * M_PI);
 		float64 u = 0;
 		float64 y = readChan0[0] * analog_read_gain + analog_read_bias;
 
@@ -164,7 +162,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < runTime * sampleFs; i++)
 	{
 
-		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI) + 0.3 * dist_gain * sin(globalTime * 2 * dist_freq * 2 * M_PI);
 		float64 y = readChan0[0] * analog_read_gain + analog_read_bias;
 		float64 u = 0;
 

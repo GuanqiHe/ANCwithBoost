@@ -2,12 +2,13 @@
 .vscode/
 build/
 lib/
-*.mat
+# *.mat
 *.bin
 run/
 test/
-*.gif
+# *.gif
 *.m4a
 files/
 CMakeFiles/
 data/
+*.autosave

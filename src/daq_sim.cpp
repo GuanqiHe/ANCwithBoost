@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
 	for (int32 i = 0; i < warmUp * sampleFs; i++)
 	{
 
-		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI) + dist_gain/2 * sin(globalTime * dist_freq * 2 * 2 * M_PI);
 		float64 u = 0;
 		float64 y = model_output;
 
@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < runTime * sampleFs; i++)
 	{
 
-		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI);
+		float64 d = dist_gain * sin(globalTime * dist_freq * 2 * M_PI) + dist_gain/2 * sin(globalTime * dist_freq * 2 * 2 * M_PI);
 		float64 y = model_output;
 		float64 u = controllerCompute(ctrl_ptr, y);
 
